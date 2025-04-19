@@ -1,0 +1,7 @@
+python main_HTNet.py --train False
+
+python main_HTNet.py --train True
+
+stdbuf -oL nohup python main_HTNet.py --train True > output2.log 2>&1 &
+
+nohup python main_HTNet.py --train True > output2.log 2>&1 &
