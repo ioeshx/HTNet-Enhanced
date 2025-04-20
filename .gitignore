@@ -1,1 +1,4 @@
 __pycache__/
+logs/
+model_struct.txt
+weights/

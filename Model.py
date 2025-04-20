@@ -196,3 +196,113 @@ class Fusionmodel(nn.Module):
     fuse_whole_four_parts = self.d1(fuse_whole_four_parts)
     out = self.fc_2(fuse_whole_four_parts)
     return out
+
+
+class HTNet_Enhanced(nn.Module):
+    def __init__(
+        self,
+        *,
+        image_size,
+        patch_size,
+        num_classes,
+        dim,
+        heads,
+        num_hierarchies,
+        block_repeats,
+        mlp_mult = 4,
+        channels = 3,
+        dim_head = 64,
+        dropout = 0.
+    ):
+        super().__init__()
+        assert (image_size % patch_size) == 0, 'Image dimensions must be divisible by the patch size.'
+        patch_dim = channels * patch_size ** 2 # 3*7*7
+        fmap_size = image_size // patch_size # 28/7 = 4
+        blocks = 2 ** (num_hierarchies - 1) # 4
+
+        seq_len = (fmap_size // blocks) ** 2   # =1, sequence length is held constant across heirarchy
+        hierarchies = list(reversed(range(num_hierarchies))) # 2 1 0
+        mults = [2 ** i for i in reversed(hierarchies)] # 1 2 4
+
+        layer_heads = list(map(lambda t: t * heads, mults)) # 3,6,12
+        layer_dims = list(map(lambda t: t * dim, mults)) # 256,512,1024
+        last_dim = layer_dims[-1]
+
+        layer_dims = [*layer_dims, layer_dims[-1]]  # 256,512,1024,1024
+        dim_pairs = zip(layer_dims[:-1], layer_dims[1:]) # ((256,512), (512,1024), (1024,1024))
+        
+        self.to_patch_embedding = nn.Sequential(
+            Rearrange('b c (h p1) (w p2) -> b (p1 p2 c) h w', p1 = patch_size, p2 = patch_size),    # rearrange后h和w就是 image_size / patch_size
+            nn.Conv2d(patch_dim, layer_dims[0], 1),
+        )
+
+        block_repeats = cast_tuple(block_repeats, num_hierarchies)
+        self.layers = nn.ModuleList([])
+        for level, heads, (dim_in, dim_out), block_repeat in zip(hierarchies, layer_heads, dim_pairs, block_repeats):
+            is_last = level == 0
+            depth = block_repeat
+            self.layers.append(nn.ModuleList([
+                Transformer(dim_in, seq_len, depth, heads, mlp_mult, dropout),
+                Aggregate(dim_in, dim_out) if not is_last else nn.Identity()
+            ]))
+
+        # TODO:1 init another branch
+        self.globalTransformer = GlobalTransformer(
+            dim_in=layer_dims[0],   # 256
+            dim_out=layer_dims[-1], # 1024
+            seq_len=seq_len, # 1 should be
+            depth=2,
+            heads=layer_heads[0], # 3
+        )
+
+        self.mlp_head = nn.Sequential(
+            LayerNorm(last_dim*2),
+            Reduce('b c h w -> b c', 'mean'),
+            nn.Linear(last_dim*2, num_classes)
+        )
+    
+    def forward(self, img):
+        x = self.to_patch_embedding(img)
+        b, c, h, w = x.shape
+        num_hierarchies = len(self.layers) # 3
+
+        x_Global_transformer = x.clone()  # 使用 clone() 方法复制张量
+
+        for level, (transformer, aggregate) in zip(reversed(range(num_hierarchies)), self.layers):
+            block_size = 2 ** level # 4,2,1
+            x = rearrange(x, 'b c (b1 h) (b2 w) -> (b b1 b2) c h w', b1 = block_size, b2 = block_size)
+            x = transformer(x)
+            x = rearrange(x, '(b b1 b2) c h w -> b c (b1 h) (b2 w)', b1 = block_size, b2 = block_size)
+            x = aggregate(x)
+
+        # TODO:2 fusion
+        # rerrange 堆叠到batch维度上
+        x_2 = self.globalTransformer(x_Global_transformer)
+        # print(x.size())
+        # print(x_2.size())
+        x_fused = torch.cat((x, x_2), dim=1)
+
+        return self.mlp_head(x_fused)
+        
+
+# TODO:3 implement global transformer
+class GlobalTransformer(nn.Module):
+    def __init__(self, dim_in, dim_out, seq_len, depth, heads, mlp_mult=4, dropout=0.):
+        super().__init__()
+        self.transformer = Transformer(dim_in, seq_len=seq_len, depth=depth, heads=heads, mlp_mult=mlp_mult, dropout=dropout)
+        self.conv1 = nn.Conv2d(dim_in, dim_out, kernel_size=3)
+        self.conv2 = nn.Conv2d(dim_out, dim_out, kernel_size=2)
+        self.bn = nn.BatchNorm2d(dim_out)
+        
+
+    def forward(self, x):
+        h = x.shape[2]
+        w = x.shape[3]
+
+        x = rearrange(x, 'b c (b1 h) (b2 w) -> (b b1 b2) c h w', b1 = h, b2 = w)
+        x = self.transformer(x)
+        x = rearrange(x, '(b b1 b2) c h w -> b c (b1 h) (b2 w)', b1 = h, b2 = w)
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = self.bn(x)
+        return x

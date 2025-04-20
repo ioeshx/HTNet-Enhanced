@@ -16,13 +16,13 @@ import argparse
 # migration advice https://peps.python.org/pep-0632/#migration-advice
 # from distutils.util import strtobool
 import torch
-from Model import HTNet
+from Model import HTNet, HTNet_Enhanced
 import numpy as np
 from facenet_pytorch import MTCNN
 
 
-CSV_PATH = '../label/combined_3_class2_for_optical_flow.csv'
-BASE_DATA_DIR = '../datasets/combined_datasets_whole'
+CSV_PATH = './label/combined_3_class2_for_optical_flow.csv'
+BASE_DATA_DIR = './datasets/combined_datasets_whole'
 WHOLE_OPTICAL_FLOW_PATH = './datasets/STSNet_whole_norm_u_v_os'
 MAIN_PATH = './datasets/three_norm_u_v_os'
 WEIGHT_DIR = 'weights'
@@ -250,7 +250,7 @@ def main(config):
         weight_path = WEIGHT_DIR + '/' + n_subName + '.pth'
 
         # Reset or load model weigts
-        model = HTNet(
+        model = HTNet_Enhanced(
             image_size=28,
             patch_size=7,
             dim=256,  # 256,--96, 56-, 192

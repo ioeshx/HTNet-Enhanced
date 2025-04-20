@@ -5,3 +5,12 @@ python main_HTNet.py --train True
 stdbuf -oL nohup python main_HTNet.py --train True > output2.log 2>&1 &
 
 nohup python main_HTNet.py --train True > output2.log 2>&1 &
+
+
+export CUDA_VISIBLE_DEVICES=0
+cd code
+python main_HTNet.py\
+--train True\
+--learning_rate 0.0005\
+--batch_size 256\
+--epoch 800
