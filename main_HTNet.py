@@ -189,9 +189,9 @@ class Fusionmodel(nn.Module):
     return out
 
 def main(config):
-    learning_rate = 0.00005
-    batch_size = 256
-    epochs = 800
+    learning_rate = config.learning_rate
+    batch_size = config.batch_size
+    epochs = config.epochs
     all_accuracy_dict = {}
     is_cuda = torch.cuda.is_available()
 

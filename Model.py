@@ -290,9 +290,12 @@ class GlobalTransformer(nn.Module):
     def __init__(self, dim_in, dim_out, seq_len, depth, heads, mlp_mult=4, dropout=0.):
         super().__init__()
         self.transformer = Transformer(dim_in, seq_len=seq_len, depth=depth, heads=heads, mlp_mult=mlp_mult, dropout=dropout)
+        # 这部分换成类似block aggregate的结构
         self.conv1 = nn.Conv2d(dim_in, dim_out, kernel_size=3)
-        self.conv2 = nn.Conv2d(dim_out, dim_out, kernel_size=2)
-        self.bn = nn.BatchNorm2d(dim_out)
+        # layerNorm
+        self.LN = LayerNorm(dim_out)
+        self.maxpool = nn.MaxPool2d(kernel_size=2)
+        # self.conv2 = nn.Conv2d(dim_out, dim_out, kernel_size=2)
         
 
     def forward(self, x):
@@ -303,6 +306,6 @@ class GlobalTransformer(nn.Module):
         x = self.transformer(x)
         x = rearrange(x, '(b b1 b2) c h w -> b c (b1 h) (b2 w)', b1 = h, b2 = w)
         x = self.conv1(x)
-        x = self.conv2(x)
-        x = self.bn(x)
+        x = self.LN(x)
+        x = self.maxpool(x)
         return x
