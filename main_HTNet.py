@@ -346,14 +346,16 @@ def main(config):
         total_gt.extend(y.tolist())
         best_total_pred.extend(best_each_subject_pred)      # 这里存的是最好的预测结果
         UF1, UAR = recognition_evaluation(total_gt, total_pred, show=True)
+        print('Evalution with last prediction\nUF1:', round(UF1, 4), '| UAR:', round(UAR, 4))
         best_UF1, best_UAR = recognition_evaluation(total_gt, best_total_pred, show=True)
         print('best UF1:', round(best_UF1, 4), '| best UAR:', round(best_UAR, 4))
         
         time_delta = timedelta(seconds=time.time()-time_one_sub)
         print("total time used for one subject: ", str(time_delta))
+        print("="*20)
 
     print('Final Evaluation: ')
-    UF1, UAR = recognition_evaluation(total_gt, total_pred)
+    UF1, UAR = recognition_evaluation(total_gt, total_pred) # 这里的UF1和UAR是
     print('Evalution with last prediction\nUF1:', round(UF1, 4), '| UAR:', round(UAR, 4))
     print(np.shape(total_gt))
     total_time_delta = timedelta(seconds=time.time()-t)
