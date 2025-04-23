@@ -248,15 +248,15 @@ class HTNet_Enhanced(nn.Module):
 
         #TODO 1 init another branch
         self.globalTransformer = GlobalTransformer_2(
-            dim_in=layer_dims[0],   # 256
-            dim_out=layer_dims[-1], # 1024
+            dim_in=128,   # 256
+            dim_out=512, # 1024
             seq_len=image_size ** 2, # image size should be
             depth=2,
             heads=layer_heads[0], # 3
         )
 
         self.mlp_head = nn.Sequential(
-            LayerNorm(last_dim*2),
+            LayerNorm(last_dim + 512),
             Reduce('b c h w -> b c', 'mean'),
             nn.Linear(last_dim*2, num_classes)
         )
