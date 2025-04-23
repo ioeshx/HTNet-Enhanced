@@ -4,4 +4,4 @@ current_time=$(date +"%m-%d_%H-%M")
 
 nohup python main_HTNet.py \
 --epochs 400 \
---train True > logs/output_${current_time}.log
+--train True > logs/output_${current_time}_modify_3.log
