@@ -1,0 +1,12 @@
+einops
+matplotlib
+numpy
+opencv_python
+pandas
+pillow
+scikit_learn
+scipy
+torch
+torch_summary
+torchvision
+vit_pytorch
