@@ -361,6 +361,9 @@ def main(config):
         total_pred.extend(torch.max(yhat, 1)[1].tolist())   # 这里存的是最后一个epoch的预测结果
         total_gt.extend(y.tolist())
         best_total_pred.extend(best_each_subject_pred)      # 这里存的是最好的预测结果
+        # print(total_gt)
+        # print(total_pred)
+        # print(best_total_pred)
         UF1, UAR = recognition_evaluation(total_gt, total_pred, show=True)
         print('Evalution with last prediction\nUF1:', round(UF1, 4), '| UAR:', round(UAR, 4))
         best_UF1, best_UAR = recognition_evaluation(total_gt, best_total_pred, show=True)

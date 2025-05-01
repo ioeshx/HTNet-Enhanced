@@ -246,11 +246,11 @@ class HTNet_Enhanced(nn.Module):
                 Aggregate(dim_in, dim_out) if not is_last else nn.Identity()
             ]))
 
-        # TODO:1 init another branch
-        self.globalTransformer = GlobalTransformer(
+        #TODO 1 init another branch
+        self.globalTransformer = GlobalTransformer_2(
             dim_in=layer_dims[0],   # 256
             dim_out=layer_dims[-1], # 1024
-            seq_len=seq_len, # 1 should be
+            seq_len=image_size ** 2, # image size should be
             depth=2,
             heads=layer_heads[0], # 3
         )
@@ -266,7 +266,7 @@ class HTNet_Enhanced(nn.Module):
         b, c, h, w = x.shape
         num_hierarchies = len(self.layers) # 3
 
-        x_Global_transformer = x.clone()  # 使用 clone() 方法复制张量
+        # x_Global_transformer = x.clone()  # 使用 clone() 方法复制张量
 
         for level, (transformer, aggregate) in zip(reversed(range(num_hierarchies)), self.layers):
             block_size = 2 ** level # 4,2,1
@@ -275,24 +275,21 @@ class HTNet_Enhanced(nn.Module):
             x = rearrange(x, '(b b1 b2) c h w -> b c (b1 h) (b2 w)', b1 = block_size, b2 = block_size)
             x = aggregate(x)
 
-        # TODO:2 fusion
-        # rerrange 堆叠到batch维度上
-        x_2 = self.globalTransformer(x_Global_transformer)
+        #TODO 2 fusion, rerrange 堆叠到batch维度上
+        x_2 = self.globalTransformer(img)
         # print(x.size())
         # print(x_2.size())
         x_fused = torch.cat((x, x_2), dim=1)
 
         return self.mlp_head(x_fused)
         
-
-# TODO:3 implement global transformer
+## TODO 3
 class GlobalTransformer(nn.Module):
     def __init__(self, dim_in, dim_out, seq_len, depth, heads, mlp_mult=4, dropout=0.):
         super().__init__()
         self.transformer = Transformer(dim_in, seq_len=seq_len, depth=depth, heads=heads, mlp_mult=mlp_mult, dropout=dropout)
         # 这部分换成类似block aggregate的结构
         self.conv1 = nn.Conv2d(dim_in, dim_out, kernel_size=3)
-        # layerNorm
         self.LN = LayerNorm(dim_out)
         self.maxpool = nn.MaxPool2d(kernel_size=2)
         # self.conv2 = nn.Conv2d(dim_out, dim_out, kernel_size=2)
@@ -309,3 +306,25 @@ class GlobalTransformer(nn.Module):
         x = self.LN(x)
         x = self.maxpool(x)
         return x
+    
+class GlobalTransformer_2(nn.Module):
+    def __init__(self, dim_in, dim_out, seq_len, depth, heads, mlp_mult=4, dropout=0.):
+        super().__init__()
+        self.conv0 = nn.Conv2d(3, dim_in, kernel_size=3, padding=1)
+        self.transformer = Transformer(dim_in, seq_len=seq_len, depth=depth, heads=heads, mlp_mult=mlp_mult, dropout=dropout)
+        self.conv1 = nn.Conv2d(dim_in, dim_in*2, kernel_size=7, stride=7) # output: 4*4 fmap
+        self.conv2 = nn.Conv2d(dim_in*2, dim_out, kernel_size=2, stride=2)
+        self.avgpool = nn.AvgPool2d(kernel_size=2)
+        
+    # 整个28*28特征图直接输入transformer -> conv2d 7*7 -> conv2d 2*2, 最后avgpool输出 1*1，升维度到1024
+    def forward(self, x):
+        h = x.shape[2]
+        w = x.shape[3]
+        
+        x = self.conv0(x)
+        x = self.transformer(x)
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = self.avgpool(x)
+        return x
+
