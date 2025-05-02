@@ -1,6 +1,7 @@
 from os import path
 import os
 import sys
+import importlib
 
 import numpy as np
 import cv2
@@ -16,7 +17,7 @@ import argparse
 # migration advice https://peps.python.org/pep-0632/#migration-advice
 # from distutils.util import strtobool
 import torch
-from Model import HTNet, HTNet_Enhanced
+from Model import *
 import numpy as np
 from facenet_pytorch import MTCNN
 
@@ -195,7 +196,6 @@ class Fusionmodel(nn.Module):
     # fuse_out = self.bn1(fuse_out)
     fuse_out = self.relu(fuse_out)
     fuse_out = self.d1(fuse_out) # drop out
-    #
     fuse_whole_five_parts = torch.cat(
         (whole_feature,fuse_out), 0)
     # fuse_whole_five_parts = self.bn1(fuse_whole_five_parts)
@@ -209,6 +209,9 @@ def main(config):
     batch_size = config.batch_size
     epochs = config.epochs
     all_accuracy_dict = {}
+    # Module = importlib.import_module("Model")
+    # model_type = getattr(Module, config.model_type)
+
     is_cuda = torch.cuda.is_available()
 
     if is_cuda:
@@ -219,12 +222,14 @@ def main(config):
     if (config.train):
         if not path.exists(WEIGHT_DIR):
             os.mkdir(WEIGHT_DIR)
-
+    
+    # print(f"Models: {config.model_type}\n")
     print('lr=%f, epochs=%d, device=%s\n' % (learning_rate, epochs, device))
 
     total_gt = []
     total_pred = []
     best_total_pred = []
+    model_name_printed = False
 
     t = time.time()
 
@@ -266,7 +271,7 @@ def main(config):
         weight_path = WEIGHT_DIR + '/' + n_subName + '.pth'
 
         # Reset or load model weigts
-        model = HTNet(
+        model = HTNet_Enhanced_v3(
             image_size=28,
             patch_size=7,
             dim=256,  # 256,--96, 56-, 192
@@ -276,7 +281,13 @@ def main(config):
             # the number of transformer blocks at each heirarchy, starting from the bottom(2,2,20) -
             num_classes=3
         )
-
+        
+        if not model_name_printed:
+            print("="*20)
+            print(f"Model: {model.__class__.__name__}")
+            print("="*20)
+            model_name_printed = True
+        
         model = model.to(device)
 
         if(config.train):
@@ -392,6 +403,7 @@ if __name__ == '__main__':
     parser.add_argument('--learning_rate', type=float, default=0.00005, help='Learning rate for training')
     parser.add_argument('--batch_size', type=int, default=256, help='Batch size for training')
     parser.add_argument('--epochs', type=int, default=800, help='Number of epochs for training')
+    parser.add_argument('--model_type', type=str, default="HTNet", help="decide which model to use")
 
     config = parser.parse_args()
     main(config)

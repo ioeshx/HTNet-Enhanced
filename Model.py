@@ -5,6 +5,7 @@ from torch import nn, einsum
 from einops import rearrange
 from einops.layers.torch import Rearrange, Reduce
 
+
 def cast_tuple(val, depth):
     return val if isinstance(val, tuple) else ((val,) * depth)
 
@@ -198,7 +199,7 @@ class Fusionmodel(nn.Module):
     return out
 
 
-class HTNet_Enhanced(nn.Module):
+class HTNet_Enhanced_v2(nn.Module):
     def __init__(
         self,
         *,
@@ -275,7 +276,7 @@ class HTNet_Enhanced(nn.Module):
             x = rearrange(x, '(b b1 b2) c h w -> b c (b1 h) (b2 w)', b1 = block_size, b2 = block_size)
             x = aggregate(x)
 
-        #TODO 2 fusion, rerrange 堆叠到batch维度上
+        #TODO 2
         x_2 = self.globalTransformer(img)
         # print(x.size())
         # print(x_2.size())
@@ -283,7 +284,7 @@ class HTNet_Enhanced(nn.Module):
 
         return self.mlp_head(x_fused)
         
-## TODO 3
+
 class GlobalTransformer(nn.Module):
     def __init__(self, dim_in, dim_out, seq_len, depth, heads, mlp_mult=4, dropout=0.):
         super().__init__()
@@ -328,3 +329,111 @@ class GlobalTransformer_2(nn.Module):
         x = self.avgpool(x)
         return x
 
+
+class SqueezeAndExcitation(nn.Module):
+    def __init__(self, channel, ratio=8):
+        super(SqueezeAndExcitation, self).__init__()
+        # 全局平均池化层，将特征图压缩为1x1xC
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        # 两个全连接层，第一个全连接层将通道数压缩为channel//ratio，第二个全连接层恢复通道数
+        self.network = nn.Sequential(
+            nn.Linear(channel, channel // ratio, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channel // ratio, channel, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, inputs):
+        b, c, _, _ = inputs.shape  # 获取输入特征图的batch size和通道数
+        x = self.avg_pool(inputs)  # 全局平均池化
+        x = x.view(b, c)  # 将特征图展平为[b, c]
+        x = self.network(x)  # 通过两个全连接层
+        x = x.view(b, c, 1, 1)  # 将特征图恢复为[b, c, 1, 1]
+        x = inputs * x  # 将SE模块的输出与输入特征图相乘
+        return x
+
+
+class HTNet_Enhanced_v3(nn.Module):
+    def __init__(
+        self,
+        *,
+        image_size,
+        patch_size,
+        num_classes,
+        dim,
+        heads,
+        num_hierarchies,
+        block_repeats,
+        mlp_mult = 4,
+        channels = 3,
+        dim_head = 64,
+        dropout = 0.
+    ):
+        super().__init__()
+        assert (image_size % patch_size) == 0, 'Image dimensions must be divisible by the patch size.'
+        patch_dim = channels * patch_size ** 2 # 3*7*7
+        fmap_size = image_size // patch_size # 28/7 = 4
+        blocks = 2 ** (num_hierarchies - 1) # 4
+
+        seq_len = (fmap_size // blocks) ** 2   # =1, sequence length is held constant across heirarchy
+        hierarchies = list(reversed(range(num_hierarchies))) # 2 1 0
+        mults = [2 ** i for i in reversed(hierarchies)] # 1 2 4
+
+        layer_heads = list(map(lambda t: t * heads, mults)) # 3,6,12
+        layer_dims = list(map(lambda t: t * dim, mults)) # 256,512,1024
+        last_dim = layer_dims[-1]
+
+        layer_dims = [*layer_dims, layer_dims[-1]]  # 256,512,1024,1024
+        dim_pairs = zip(layer_dims[:-1], layer_dims[1:]) # ((256,512), (512,1024), (1024,1024))
+        
+        self.to_patch_embedding = nn.Sequential(
+            Rearrange('b c (h p1) (w p2) -> b (p1 p2 c) h w', p1 = patch_size, p2 = patch_size),    # rearrange后h和w就是 image_size / patch_size
+            nn.Conv2d(patch_dim, layer_dims[0], 1),
+        )
+
+        block_repeats = cast_tuple(block_repeats, num_hierarchies)
+        self.layers = nn.ModuleList([])
+        for level, heads, (dim_in, dim_out), block_repeat in zip(hierarchies, layer_heads, dim_pairs, block_repeats):
+            is_last = level == 0
+            depth = block_repeat
+            self.layers.append(nn.ModuleList([
+                Transformer(dim_in, seq_len, depth, heads, mlp_mult, dropout),
+                Aggregate(dim_in, dim_out) if not is_last else nn.Identity()
+            ]))
+
+        #TODO 1 init another branch
+        self.globalTransformer = GlobalTransformer_2(
+            dim_in=layer_dims[0],   # 256
+            dim_out=layer_dims[-1], # 1024
+            seq_len=image_size ** 2, # image size should be
+            depth=2,
+            heads=layer_heads[0], # 3
+        )
+
+        self.se = SqueezeAndExcitation(last_dim*2)
+
+        self.mlp_head = nn.Sequential(
+            LayerNorm(last_dim*2),
+            Reduce('b c h w -> b c', 'mean'),
+            nn.Linear(last_dim*2, num_classes)
+        )
+    
+    def forward(self, img):
+        x = self.to_patch_embedding(img)
+        b, c, h, w = x.shape
+        num_hierarchies = len(self.layers) # 3
+
+        for level, (transformer, aggregate) in zip(reversed(range(num_hierarchies)), self.layers):
+            block_size = 2 ** level # 4,2,1
+            x = rearrange(x, 'b c (b1 h) (b2 w) -> (b b1 b2) c h w', b1 = block_size, b2 = block_size)
+            x = transformer(x)
+            x = rearrange(x, '(b b1 b2) c h w -> b c (b1 h) (b2 w)', b1 = block_size, b2 = block_size)
+            x = aggregate(x)
+
+        #TODO 2
+        x_2 = self.globalTransformer(img)
+        # print(x.size())
+        # print(x_2.size())
+        x_concat = torch.cat((x, x_2), dim=1)
+        x_fused = self.se(x_concat)
+        return self.mlp_head(x_fused)
