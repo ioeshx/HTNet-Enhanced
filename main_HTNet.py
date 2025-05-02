@@ -1,6 +1,7 @@
 from os import path
 import os
 import sys
+import importlib
 
 import numpy as np
 import cv2
@@ -16,7 +17,7 @@ import argparse
 # migration advice https://peps.python.org/pep-0632/#migration-advice
 # from distutils.util import strtobool
 import torch
-from Model import HTNet, HTNet_Enhanced
+from Model import *
 import numpy as np
 from facenet_pytorch import MTCNN
 
@@ -51,34 +52,50 @@ def reset_weights(m):  # Reset the weights for network to avoid weight leakage
             layer.reset_parameters()
 
 def confusionMatrix(gt, pred, show=False):
-    TN, FP, FN, TP = confusion_matrix(gt, pred).ravel()
+    TN, FP, FN, TP = confusion_matrix(gt, pred, labels=[0,1]).ravel()
+    # TN, FP, FN, TP = confusion_matrix(gt, pred).ravel()
     f1_score = (2 * TP) / (2 * TP + FP + FN)
     num_samples = len([x for x in gt if x == 1])
     average_recall = TP / num_samples
     return f1_score, average_recall
-
 
 def recognition_evaluation(final_gt, final_pred, show=False):
     label_dict = {'negative': 0, 'positive': 1, 'surprise': 2}
     # Display recognition result
     f1_list = []
     ar_list = []
-    try:
-        for emotion, emotion_index in label_dict.items():
-            gt_recog = [1 if x == emotion_index else 0 for x in final_gt]
-            pred_recog = [1 if x == emotion_index else 0 for x in final_pred]
-            try:
-                f1_recog, ar_recog = confusionMatrix(gt_recog, pred_recog)
-                f1_list.append(f1_recog)
-                ar_list.append(ar_recog)
-            except Exception as e:
-                print("recognition evaluation error!")
-                sys.exit()
-        UF1 = np.mean(f1_list)
-        UAR = np.mean(ar_list)
-        return UF1, UAR
-    except:
-        return '', ''
+    
+    for emotion, emotion_index in label_dict.items():
+        gt_recog = [1 if x == emotion_index else 0 for x in final_gt]
+        pred_recog = [1 if x == emotion_index else 0 for x in final_pred]
+        f1_recog, ar_recog = confusionMatrix(gt_recog, pred_recog)
+        f1_list.append(f1_recog)
+        ar_list.append(ar_recog)
+    UF1 = np.mean(f1_list)
+    UAR = np.mean(ar_list)
+    return UF1, UAR
+
+# def recognition_evaluation(final_gt, final_pred, show=False):
+#     label_dict = {'negative': 0, 'positive': 1, 'surprise': 2}
+#     # Display recognition result
+#     f1_list = []
+#     ar_list = []
+#     try:
+#         for emotion, emotion_index in label_dict.items():
+#             gt_recog = [1 if x == emotion_index else 0 for x in final_gt]
+#             pred_recog = [1 if x == emotion_index else 0 for x in final_pred]
+#             try:
+#                 f1_recog, ar_recog = confusionMatrix(gt_recog, pred_recog)
+#                 f1_list.append(f1_recog)
+#                 ar_list.append(ar_recog)
+#             except Exception as e:
+#                 print("recognition evaluation error!")
+#                 sys.exit()
+#         UF1 = np.mean(f1_list)
+#         UAR = np.mean(ar_list)
+#         return UF1, UAR
+#     except:
+#         return '', ''
 
 # 1. get the whole face block coordinates
 def whole_face_block_coordinates():
@@ -179,7 +196,6 @@ class Fusionmodel(nn.Module):
     # fuse_out = self.bn1(fuse_out)
     fuse_out = self.relu(fuse_out)
     fuse_out = self.d1(fuse_out) # drop out
-    #
     fuse_whole_five_parts = torch.cat(
         (whole_feature,fuse_out), 0)
     # fuse_whole_five_parts = self.bn1(fuse_whole_five_parts)
@@ -193,6 +209,9 @@ def main(config):
     batch_size = config.batch_size
     epochs = config.epochs
     all_accuracy_dict = {}
+    # Module = importlib.import_module("Model")
+    # model_type = getattr(Module, config.model_type)
+
     is_cuda = torch.cuda.is_available()
 
     if is_cuda:
@@ -203,12 +222,14 @@ def main(config):
     if (config.train):
         if not path.exists(WEIGHT_DIR):
             os.mkdir(WEIGHT_DIR)
-
+    
+    # print(f"Models: {config.model_type}\n")
     print('lr=%f, epochs=%d, device=%s\n' % (learning_rate, epochs, device))
 
     total_gt = []
     total_pred = []
     best_total_pred = []
+    model_name_printed = False
 
     t = time.time()
 
@@ -250,7 +271,7 @@ def main(config):
         weight_path = WEIGHT_DIR + '/' + n_subName + '.pth'
 
         # Reset or load model weigts
-        model = HTNet_Enhanced(
+        model = HTNet_Enhanced_v3(
             image_size=28,
             patch_size=7,
             dim=256,  # 256,--96, 56-, 192
@@ -260,7 +281,13 @@ def main(config):
             # the number of transformer blocks at each heirarchy, starting from the bottom(2,2,20) -
             num_classes=3
         )
-
+        
+        if not model_name_printed:
+            print("="*20)
+            print(f"Model: {model.__class__.__name__}")
+            print("="*20)
+            model_name_printed = True
+        
         model = model.to(device)
 
         if(config.train):
@@ -345,6 +372,9 @@ def main(config):
         total_pred.extend(torch.max(yhat, 1)[1].tolist())   # 这里存的是最后一个epoch的预测结果
         total_gt.extend(y.tolist())
         best_total_pred.extend(best_each_subject_pred)      # 这里存的是最好的预测结果
+        # print(total_gt)
+        # print(total_pred)
+        # print(best_total_pred)
         UF1, UAR = recognition_evaluation(total_gt, total_pred, show=True)
         print('Evalution with last prediction\nUF1:', round(UF1, 4), '| UAR:', round(UAR, 4))
         best_UF1, best_UAR = recognition_evaluation(total_gt, best_total_pred, show=True)
@@ -373,6 +403,7 @@ if __name__ == '__main__':
     parser.add_argument('--learning_rate', type=float, default=0.00005, help='Learning rate for training')
     parser.add_argument('--batch_size', type=int, default=256, help='Batch size for training')
     parser.add_argument('--epochs', type=int, default=800, help='Number of epochs for training')
+    parser.add_argument('--model_type', type=str, default="HTNet", help="decide which model to use")
 
     config = parser.parse_args()
     main(config)
