@@ -5,6 +5,7 @@ from torch import nn, einsum
 from einops import rearrange
 from einops.layers.torch import Rearrange, Reduce
 
+from native_sparse_attention_pytorch import SparseAttention
 
 def cast_tuple(val, depth):
     return val if isinstance(val, tuple) else ((val,) * depth)
@@ -284,75 +285,6 @@ class HTNet_Enhanced_v2(nn.Module):
 
         return self.mlp_head(x_fused)
         
-
-class GlobalTransformer(nn.Module):
-    def __init__(self, dim_in, dim_out, seq_len, depth, heads, mlp_mult=4, dropout=0.):
-        super().__init__()
-        self.transformer = Transformer(dim_in, seq_len=seq_len, depth=depth, heads=heads, mlp_mult=mlp_mult, dropout=dropout)
-        # 这部分换成类似block aggregate的结构
-        self.conv1 = nn.Conv2d(dim_in, dim_out, kernel_size=3)
-        self.LN = LayerNorm(dim_out)
-        self.maxpool = nn.MaxPool2d(kernel_size=2)
-        # self.conv2 = nn.Conv2d(dim_out, dim_out, kernel_size=2)
-        
-
-    def forward(self, x):
-        h = x.shape[2]
-        w = x.shape[3]
-
-        x = rearrange(x, 'b c (b1 h) (b2 w) -> (b b1 b2) c h w', b1 = h, b2 = w)
-        x = self.transformer(x)
-        x = rearrange(x, '(b b1 b2) c h w -> b c (b1 h) (b2 w)', b1 = h, b2 = w)
-        x = self.conv1(x)
-        x = self.LN(x)
-        x = self.maxpool(x)
-        return x
-    
-class GlobalTransformer_2(nn.Module):
-    def __init__(self, dim_in, dim_out, seq_len, depth, heads, mlp_mult=4, dropout=0.):
-        super().__init__()
-        self.conv0 = nn.Conv2d(3, dim_in, kernel_size=3, padding=1)
-        self.transformer = Transformer(dim_in, seq_len=seq_len, depth=depth, heads=heads, mlp_mult=mlp_mult, dropout=dropout)
-        self.conv1 = nn.Conv2d(dim_in, dim_in*2, kernel_size=7, stride=7) # output: 4*4 fmap
-        self.conv2 = nn.Conv2d(dim_in*2, dim_out, kernel_size=2, stride=2)
-        self.avgpool = nn.AvgPool2d(kernel_size=2)
-        
-    # 整个28*28特征图直接输入transformer -> conv2d 7*7 -> conv2d 2*2, 最后avgpool输出 1*1，升维度到1024
-    def forward(self, x):
-        h = x.shape[2]
-        w = x.shape[3]
-        
-        x = self.conv0(x)
-        x = self.transformer(x)
-        x = self.conv1(x)
-        x = self.conv2(x)
-        x = self.avgpool(x)
-        return x
-
-
-class SqueezeAndExcitation(nn.Module):
-    def __init__(self, channel, ratio=8):
-        super(SqueezeAndExcitation, self).__init__()
-        # 全局平均池化层，将特征图压缩为1x1xC
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        # 两个全连接层，第一个全连接层将通道数压缩为channel//ratio，第二个全连接层恢复通道数
-        self.network = nn.Sequential(
-            nn.Linear(channel, channel // ratio, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Linear(channel // ratio, channel, bias=False),
-            nn.Sigmoid()
-        )
-
-    def forward(self, inputs):
-        b, c, _, _ = inputs.shape  # 获取输入特征图的batch size和通道数
-        x = self.avg_pool(inputs)  # 全局平均池化
-        x = x.view(b, c)  # 将特征图展平为[b, c]
-        x = self.network(x)  # 通过两个全连接层
-        x = x.view(b, c, 1, 1)  # 将特征图恢复为[b, c, 1, 1]
-        x = inputs * x  # 将SE模块的输出与输入特征图相乘
-        return x
-
-
 class HTNet_Enhanced_v3(nn.Module):
     def __init__(
         self,
@@ -437,3 +369,127 @@ class HTNet_Enhanced_v3(nn.Module):
         x_concat = torch.cat((x, x_2), dim=1)
         x_fused = self.se(x_concat)
         return self.mlp_head(x_fused)
+
+class SqueezeAndExcitation(nn.Module):
+    def __init__(self, channel, ratio=8):
+        super(SqueezeAndExcitation, self).__init__()
+        # 全局平均池化层，将特征图压缩为1x1xC
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        # 两个全连接层，第一个全连接层将通道数压缩为channel//ratio，第二个全连接层恢复通道数
+        self.network = nn.Sequential(
+            nn.Linear(channel, channel // ratio, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channel // ratio, channel, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, inputs):
+        b, c, _, _ = inputs.shape  # 获取输入特征图的batch size和通道数
+        x = self.avg_pool(inputs)  # 全局平均池化
+        x = x.view(b, c)  # 将特征图展平为[b, c]
+        x = self.network(x)  # 通过两个全连接层
+        x = x.view(b, c, 1, 1)  # 将特征图恢复为[b, c, 1, 1]
+        x = inputs * x  # 将SE模块的输出与输入特征图相乘
+        return x
+
+class GlobalTransformer(nn.Module):
+    def __init__(self, dim_in, dim_out, seq_len, depth, heads, mlp_mult=4, dropout=0.):
+        super().__init__()
+        self.transformer = Transformer(dim_in, seq_len=seq_len, depth=depth, heads=heads, mlp_mult=mlp_mult, dropout=dropout)
+        # 这部分换成类似block aggregate的结构
+        self.conv1 = nn.Conv2d(dim_in, dim_out, kernel_size=3)
+        self.LN = LayerNorm(dim_out)
+        self.maxpool = nn.MaxPool2d(kernel_size=2)
+        # self.conv2 = nn.Conv2d(dim_out, dim_out, kernel_size=2)
+        
+
+    def forward(self, x):
+        h = x.shape[2]
+        w = x.shape[3]
+
+        x = rearrange(x, 'b c (b1 h) (b2 w) -> (b b1 b2) c h w', b1 = h, b2 = w)
+        x = self.transformer(x)
+        x = rearrange(x, '(b b1 b2) c h w -> b c (b1 h) (b2 w)', b1 = h, b2 = w)
+        x = self.conv1(x)
+        x = self.LN(x)
+        x = self.maxpool(x)
+        return x
+    
+class GlobalTransformer_2(nn.Module):
+    def __init__(self, dim_in, dim_out, seq_len, depth, heads, mlp_mult=4, dropout=0.):
+        super().__init__()
+        self.conv0 = nn.Conv2d(3, dim_in, kernel_size=3, padding=1)
+        self.transformer = Transformer(dim_in, seq_len=seq_len, depth=depth, heads=heads, mlp_mult=mlp_mult, dropout=dropout)
+        self.conv1 = nn.Conv2d(dim_in, dim_in*2, kernel_size=7, stride=7) # output: 4*4 fmap
+        self.conv2 = nn.Conv2d(dim_in*2, dim_out, kernel_size=2, stride=2)
+        self.avgpool = nn.AvgPool2d(kernel_size=2)
+        
+    # 整个28*28特征图直接输入transformer -> conv2d 7*7 -> conv2d 2*2, 最后avgpool输出 1*1，升维度到1024
+    def forward(self, x):
+        h = x.shape[2]
+        w = x.shape[3]
+        
+        x = self.conv0(x)
+        x = self.transformer(x)
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = self.avgpool(x)
+        return x
+
+# using sparse transformer
+class GlobalTransformer_3(nn.Moduel):
+    def __init__(self, dim_in, dim_out, seq_len, depth, heads, mlp_mult=4, dropout=0.):
+        super().__init__()
+        self.conv0 = nn.Conv2d(3, dim_in, kernel_size=3, padding=1)
+        self.transformer = SparseTransformer(dim_in, seq_len=seq_len, depth=depth, heads=heads, mlp_mult=mlp_mult, dropout=dropout)
+        self.conv1 = nn.Conv2d(dim_in, dim_in*2, kernel_size=7, stride=7) # output: 4*4 fmap
+        self.conv2 = nn.Conv2d(dim_in*2, dim_out, kernel_size=2, stride=2) # output: 2*2 fmpa
+        self.avgpool = nn.AvgPool2d(kernel_size=2) # 1*1 fmap
+        
+    # 整个28*28特征图直接输入transformer -> conv2d 7*7 -> conv2d 2*2, 最后avgpool输出 1*1，升维度到1024
+    def forward(self, x):
+        h = x.shape[2]
+        w = x.shape[3]
+        
+        x = self.conv0(x)
+        x = self.transformer(x)
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = self.avgpool(x)
+        return x
+
+
+class SparseTransformer(nn.Module):
+    def __init__(self, dim, seq_len, depth, heads, mlp_mult, dropout = 0.):
+        super().__init__()
+        self.layers = nn.ModuleList([])
+        self.pos_emb = nn.Parameter(torch.randn(1, seq_len, dim))
+
+        for _ in range(depth):
+            self.layers.append(nn.ModuleList([
+                PreNorm(dim, SparseAttention(
+                    dim=dim,
+                    dim_head= dim // heads,
+                    heads = heads,
+                    sliding_window_size=4,
+                    compress_block_size=4,
+                    compress_block_sliding_stride=2,
+                    selection_block_size=4,
+                    num_selected_blocks=2
+                )),
+                PreNorm(dim, FeedForward(dim, mlp_mult, dropout = dropout))
+            ]))
+    def forward(self, x:torch.Tensor):
+        b, c, h, w = x.shape
+        x = x.permute(0, 2, 3, 1).reshape(b, h * w, c)
+
+        # pos_emb = self.pos_emb[:(h * w)]
+        # pos_emb = rearrange(pos_emb, '(h w) -> () () h w', h = h, w = w)
+        x = x + self.pos_emb[:, :(h * w), :]
+
+        for attn, ff in self.layers:
+            x = attn(x) + x
+            x = ff(x) + x
+        
+        x = x.reshape(b, h, w, c).permute(0, 3, 1, 2)
+        return x
