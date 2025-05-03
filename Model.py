@@ -135,6 +135,7 @@ class HTNet(nn.Module):
         layer_heads = list(map(lambda t: t * heads, mults)) # 3,6,12
         layer_dims = list(map(lambda t: t * dim, mults)) # 256,512,1024
         last_dim = layer_dims[-1]
+        self.last_dim = last_dim
 
         layer_dims = [*layer_dims, layer_dims[-1]]  # 256,512,1024,1024
         dim_pairs = zip(layer_dims[:-1], layer_dims[1:]) # ((256,512), (512,1024), (1024,1024))
@@ -436,34 +437,11 @@ class GlobalTransformer_2(nn.Module):
         x = self.avgpool(x)
         return x
 
-# using sparse transformer
-class GlobalTransformer_3(nn.Moduel):
-    def __init__(self, dim_in, dim_out, seq_len, depth, heads, mlp_mult=4, dropout=0.):
-        super().__init__()
-        self.conv0 = nn.Conv2d(3, dim_in, kernel_size=3, padding=1)
-        self.transformer = SparseTransformer(dim_in, seq_len=seq_len, depth=depth, heads=heads, mlp_mult=mlp_mult, dropout=dropout)
-        self.conv1 = nn.Conv2d(dim_in, dim_in*2, kernel_size=7, stride=7) # output: 4*4 fmap
-        self.conv2 = nn.Conv2d(dim_in*2, dim_out, kernel_size=2, stride=2) # output: 2*2 fmpa
-        self.avgpool = nn.AvgPool2d(kernel_size=2) # 1*1 fmap
-        
-    # 整个28*28特征图直接输入transformer -> conv2d 7*7 -> conv2d 2*2, 最后avgpool输出 1*1，升维度到1024
-    def forward(self, x):
-        h = x.shape[2]
-        w = x.shape[3]
-        
-        x = self.conv0(x)
-        x = self.transformer(x)
-        x = self.conv1(x)
-        x = self.conv2(x)
-        x = self.avgpool(x)
-        return x
-
-
 class SparseTransformer(nn.Module):
     def __init__(self, dim, seq_len, depth, heads, mlp_mult, dropout = 0.):
         super().__init__()
         self.layers = nn.ModuleList([])
-        self.pos_emb = nn.Parameter(torch.randn(1, seq_len, dim))
+        self.pos_emb = nn.Parameter(torch.randn(seq_len))
 
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
@@ -481,15 +459,81 @@ class SparseTransformer(nn.Module):
             ]))
     def forward(self, x:torch.Tensor):
         b, c, h, w = x.shape
-        x = x.permute(0, 2, 3, 1).reshape(b, h * w, c)
-
-        # pos_emb = self.pos_emb[:(h * w)]
-        # pos_emb = rearrange(pos_emb, '(h w) -> () () h w', h = h, w = w)
-        x = x + self.pos_emb[:, :(h * w), :]
+       
+        pos_emb = self.pos_emb[:(h * w)]
+        pos_emb = rearrange(pos_emb, '(h w) -> () () h w', h = h, w = w)
+        x = x + self.pos_emb
 
         for attn, ff in self.layers:
+            x = x.permute(0, 2, 3, 1).reshape(b, h * w, c)
             x = attn(x) + x
+            x = x.reshape(b, h, w, c).permute(0, 3, 1, 2)
             x = ff(x) + x
         
-        x = x.reshape(b, h, w, c).permute(0, 3, 1, 2)
         return x
+    
+class HTNet_Enhanced_v4(HTNet):
+    def __init__(self,
+            *,
+            image_size,
+            patch_size,
+            num_classes,
+            dim,
+            heads,
+            num_hierarchies,
+            block_repeats,
+            mlp_mult = 4,
+            channels = 3,
+            dim_head = 64,
+            dropout = 0.
+        ):
+        super().__init__(
+            image_size=image_size,
+            patch_size=patch_size,
+            num_classes=num_classes,
+            dim=dim,
+            heads=heads,
+            num_hierarchies=num_hierarchies,
+            block_repeats=block_repeats,
+            mlp_mult = mlp_mult,
+            channels = channels,
+            dim_head = dim_head,
+            dropout = dropout
+        )
+        tf_channel = 128
+        self.globalTransformer_preConv = nn.Conv2d(channels, tf_channel, kernel_size=1)
+        self.globalTransformer = SparseTransformer(
+            dim=tf_channel,
+            seq_len=image_size ** 2,
+            depth=2,
+            heads=4,
+            mlp_mult=mlp_mult,
+            dropout=0.
+        )
+        self.global_avgpool = nn.AvgPool2d(kernel_size=image_size)
+        self.mlp_head = nn.Sequential(
+            LayerNorm(self.last_dim + tf_channel),
+            Reduce('b c h w -> b c', 'mean'),
+            nn.Linear(self.last_dim + tf_channel, num_classes)
+        )
+
+    def forward(self, img):
+        x = self.to_patch_embedding(img)
+        b, c, h, w = x.shape
+        num_hierarchies = len(self.layers) # 3
+
+        # add after patch embedding?
+
+        for level, (transformer, aggregate) in zip(reversed(range(num_hierarchies)), self.layers):
+            block_size = 2 ** level # 4,2,1
+            x = rearrange(x, 'b c (b1 h) (b2 w) -> (b b1 b2) c h w', b1 = block_size, b2 = block_size)
+            x = transformer(x)
+            x = rearrange(x, '(b b1 b2) c h w -> b c (b1 h) (b2 w)', b1 = block_size, b2 = block_size)
+            x = aggregate(x)
+        
+        x_2 = self.globalTransformer_preConv(img)
+        x_2 = self.globalTransformer(x_2)
+        x_2 = self.global_avgpool(x_2)
+
+        x = torch.concat((x,x_2), 1)
+        return self.mlp_head(x)
