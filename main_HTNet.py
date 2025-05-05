@@ -271,7 +271,7 @@ def main(config):
         weight_path = WEIGHT_DIR + '/' + n_subName + '.pth'
 
         # Reset or load model weigts
-        model = HTNet_Enhanced_v3(
+        model = HTNet_Enhanced_v4(
             image_size=28,
             patch_size=7,
             dim=256,  # 256,--96, 56-, 192

@@ -445,16 +445,16 @@ class SparseTransformer(nn.Module):
 
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
-                PreNorm(dim, SparseAttention(
+                SparseAttention(
                     dim=dim,
                     dim_head= dim // heads,
                     heads = heads,
-                    sliding_window_size=4,
-                    compress_block_size=4,
-                    compress_block_sliding_stride=2,
-                    selection_block_size=4,
-                    num_selected_blocks=2
-                )),
+                    sliding_window_size=28*7,
+                    compress_block_size=28*14,
+                    compress_block_sliding_stride=28*7,
+                    selection_block_size=28*14,
+                    num_selected_blocks=1
+                ),
                 PreNorm(dim, FeedForward(dim, mlp_mult, dropout = dropout))
             ]))
     def forward(self, x:torch.Tensor):
@@ -462,12 +462,12 @@ class SparseTransformer(nn.Module):
        
         pos_emb = self.pos_emb[:(h * w)]
         pos_emb = rearrange(pos_emb, '(h w) -> () () h w', h = h, w = w)
-        x = x + self.pos_emb
+        x = x + pos_emb
 
         for attn, ff in self.layers:
-            x = x.permute(0, 2, 3, 1).reshape(b, h * w, c)
+            x = rearrange(x, 'b c h w -> b (h w) c')
             x = attn(x) + x
-            x = x.reshape(b, h, w, c).permute(0, 3, 1, 2)
+            x = rearrange(x, 'b (h w) c -> b c h w ')
             x = ff(x) + x
         
         return x
@@ -500,13 +500,13 @@ class HTNet_Enhanced_v4(HTNet):
             dim_head = dim_head,
             dropout = dropout
         )
-        tf_channel = 128
+        tf_channel = 64
         self.globalTransformer_preConv = nn.Conv2d(channels, tf_channel, kernel_size=1)
         self.globalTransformer = SparseTransformer(
             dim=tf_channel,
             seq_len=image_size ** 2,
-            depth=2,
-            heads=4,
+            depth=1,
+            heads=2,
             mlp_mult=mlp_mult,
             dropout=0.
         )
