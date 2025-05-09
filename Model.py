@@ -554,7 +554,10 @@ class HTNet_Enhanced_v5(HTNet):
             mlp_mult = 4,
             channels = 3,
             dim_head = 64,
-            dropout = 0.
+            dropout = 0.,
+            gb_tf_channels = 64,
+            gb_heads = 2,
+            gb_n_windows = 7
         ):
         super().__init__(
             image_size=image_size,
@@ -569,20 +572,19 @@ class HTNet_Enhanced_v5(HTNet):
             dim_head = dim_head,
             dropout = dropout
         )
-        tf_channel = 128
-        self.gb_conv = nn.Conv2d(channels, tf_channel, kernel_size=1)
+        self.gb_conv = nn.Conv2d(channels, gb_tf_channels, kernel_size=1)
         # input: (N,C,H,W)
         self.gb_BiFormer = BiFromerBlock(
-            dim=tf_channel,
-            num_heads=4,
-            n_win=7,
+            dim=gb_tf_channels,
+            num_heads=gb_heads,
+            n_win=gb_n_windows,
         )
         self.gb_avgpool = nn.AvgPool2d(kernel_size=(image_size,image_size))
 
         self.mlp_head = nn.Sequential(
-            LayerNorm(self.last_dim + tf_channel),
+            LayerNorm(self.last_dim + gb_tf_channels),
             Reduce('b c h w -> b c', 'mean'),
-            nn.Linear(self.last_dim + tf_channel, num_classes)
+            nn.Linear(self.last_dim + gb_tf_channels, num_classes)
         )
 
     def forward(self, img):
@@ -601,6 +603,74 @@ class HTNet_Enhanced_v5(HTNet):
         
         x_2 = self.gb_conv(img)
         x_2 = self.gb_BiFormer(x_2)
+        x_2 = self.gb_avgpool(x_2)
+
+        x = torch.concat((x,x_2), 1)
+        return self.mlp_head(x)
+    
+class HTNet_Enhanced_v6(HTNet_Enhanced_v5):
+    def __init__(self,
+            *,
+            image_size,
+            patch_size,
+            num_classes,
+            dim,
+            heads,
+            num_hierarchies,
+            block_repeats,
+            mlp_mult = 4,
+            channels = 3,
+            dim_head = 64,
+            dropout = 0.,
+            gb_tf_channels = 64,
+            gb_heads = 2,
+            gb_n_windows = 7,
+            gb_out_channel = 256
+        ):
+        super().__init__(
+            image_size=image_size,
+            patch_size=patch_size,
+            num_classes=num_classes,
+            dim=dim,
+            heads=heads,
+            num_hierarchies=num_hierarchies,
+            block_repeats=block_repeats,
+            mlp_mult = mlp_mult,
+            channels = channels,
+            dim_head = dim_head,
+            dropout = dropout,
+            gb_tf_channels = gb_tf_channels,
+            gb_heads = gb_heads,
+            gb_n_windows = gb_n_windows
+        )
+        ## added two Conv2d
+        self.gb_conv1 = nn.Conv2d(gb_tf_channels, gb_tf_channels*2, kernel_size=7, stride=7) # output: 4*4 fmap
+        self.gb_conv2 = nn.Conv2d(gb_tf_channels*2, gb_out_channel, kernel_size=2, stride=2) # output: 2*2 fmap
+        self.gb_avgpool = nn.AvgPool2d(kernel_size=(2,2))
+        self.mlp_head = nn.Sequential(
+            LayerNorm(self.last_dim + gb_out_channel),
+            Reduce('b c h w -> b c', 'mean'),
+            nn.Linear(self.last_dim + gb_out_channel, num_classes)
+        )
+
+    def forward(self, img):
+        x = self.to_patch_embedding(img)
+        b, c, h, w = x.shape
+        num_hierarchies = len(self.layers) # 3
+
+        # add after patch embedding?
+
+        for level, (transformer, aggregate) in zip(reversed(range(num_hierarchies)), self.layers):
+            block_size = 2 ** level # 4,2,1
+            x = rearrange(x, 'b c (b1 h) (b2 w) -> (b b1 b2) c h w', b1 = block_size, b2 = block_size)
+            x = transformer(x)
+            x = rearrange(x, '(b b1 b2) c h w -> b c (b1 h) (b2 w)', b1 = block_size, b2 = block_size)
+            x = aggregate(x)
+        
+        x_2 = self.gb_conv(img)
+        x_2 = self.gb_BiFormer(x_2)
+        x_2 = self.gb_conv1(x_2)
+        x_2 = self.gb_conv2(x_2)
         x_2 = self.gb_avgpool(x_2)
 
         x = torch.concat((x,x_2), 1)

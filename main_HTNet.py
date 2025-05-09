@@ -205,15 +205,8 @@ class Fusionmodel(nn.Module):
     return out
 
 def main(config):
-    learning_rate = config.learning_rate
-    batch_size = config.batch_size
-    epochs = config.epochs
-    all_accuracy_dict = {}
-    # Module = importlib.import_module("Model")
-    # model_type = getattr(Module, config.model_type)
 
     is_cuda = torch.cuda.is_available()
-
     if is_cuda:
         device = torch.device('cuda')
     else:
@@ -224,12 +217,19 @@ def main(config):
             os.mkdir(WEIGHT_DIR)
     
     # print(f"Models: {config.model_type}\n")
-    print('lr=%f, epochs=%d, device=%s\n' % (learning_rate, epochs, device))
+    # print('lr=%f, epochs=%d, device=%s\n' % (config.learning_rate, config.epochs, device))
+    print("Configuration Parameters:")
+    for key, value in vars(config).items():
+        print(f"{key}: {value}")
+    print("=" * 20)
 
+    all_accuracy_dict = {}
+    Module = importlib.import_module("Model")
+    model_type = getattr(Module, config.model_type)
     total_gt = []
     total_pred = []
     best_total_pred = []
-    model_name_printed = False
+    # model_name_printed = False
 
     t = time.time()
 
@@ -271,22 +271,31 @@ def main(config):
         weight_path = WEIGHT_DIR + '/' + n_subName + '.pth'
 
         # Reset or load model weigts
-        model = HTNet_Enhanced_v5(
-            image_size=28,
-            patch_size=7,
-            dim=256,  # 256,--96, 56-, 192
-            heads=3,  # 3 ---- , 6-
-            num_hierarchies=3,  # 3----number of hierarchies
-            block_repeats=(2, 2, 10),#(2, 2, 8),------
-            # the number of transformer blocks at each heirarchy, starting from the bottom(2,2,20) -
-            num_classes=3
-        )
+        paramDict = vars(config)
+        import inspect
+        model_signature = inspect.signature(model_type.__init__)
+        valid_params = model_signature.parameters.keys()
+        filtered_paramDict = {k: v for k, v in paramDict.items() if k in valid_params}
+
+        model = model_type(**filtered_paramDict)
+        # model = model_type(
+        #     image_size=config.image_size,
+        #     patch_size=config.patch_size,
+        #     dim=config.dim,  # 256,--96, 56-, 192
+        #     heads=config.heads,  # 3 ---- , 6-
+        #     num_hierarchies=config.num_hierarchies,  # 3----number of hierarchies
+        #     block_repeats=config.block_repeats,#(2, 2, 8),------# the number of transformer blocks at each heirarchy, starting from the bottom(2,2,10) -
+        #     num_classes=config.num_classes,
+        #     gb_tf_channels = config.gb_tf_channels,
+        #     gb_heads = config.gb_heads,
+        #     gb_n_windows = config.gb_n_windows
+        # )
         
-        if not model_name_printed:
-            print("="*20)
-            print(f"Model: {model.__class__.__name__}")
-            print("="*20)
-            model_name_printed = True
+        # if not model_name_printed:
+        #     print("="*20)
+        #     print(f"Model: {model.__class__.__name__}")
+        #     print("="*20)
+        #     model_name_printed = True
         
         model = model.to(device)
 
@@ -295,22 +304,22 @@ def main(config):
             print('train')
         else:
             model.load_state_dict(torch.load(weight_path))
-        optimizer = torch.optim.Adam(model.parameters(),lr=learning_rate)
+        optimizer = torch.optim.Adam(model.parameters(),lr=config.learning_rate)
         y_train = torch.Tensor(y_train).to(dtype=torch.long)
         four_parts_train =  torch.Tensor(np.array(four_parts_train)).permute(0, 3, 1, 2)
         dataset_train = TensorDataset(four_parts_train, y_train)
-        train_dl = DataLoader(dataset_train, batch_size=batch_size)
+        train_dl = DataLoader(dataset_train, batch_size=config.batch_size)
         
         y_test = torch.Tensor(y_test).to(dtype=torch.long)
         four_parts_test = torch.Tensor(np.array(four_parts_test)).permute(0, 3, 1, 2)
         dataset_test = TensorDataset(four_parts_test, y_test)
-        test_dl = DataLoader(dataset_test, batch_size=batch_size)
+        test_dl = DataLoader(dataset_test, batch_size=config.batch_size)
         # store best results
         best_accuracy_for_each_subject = 0
         best_each_subject_pred = []
 
         time_one_sub = time.time()
-        for epoch in range(1, epochs + 1):
+        for epoch in range(1, config.epochs + 1):
             if (config.train):
                 # Training
                 model.train()
@@ -404,6 +413,23 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=256, help='Batch size for training')
     parser.add_argument('--epochs', type=int, default=800, help='Number of epochs for training')
     parser.add_argument('--model_type', type=str, default="HTNet", help="decide which model to use")
+    
+    # HTNet-specific parameters
+    parser.add_argument('--image_size', type=int, default=28, help='Input image size (e.g., 28 for 28x28 images)')
+    parser.add_argument('--patch_size', type=int, default=7, help='Patch size for dividing the image')
+    parser.add_argument('--dim', type=int, default=256, help='Base dimension for the model')
+    parser.add_argument('--heads', type=int, default=3, help='Number of attention heads')
+    parser.add_argument('--num_hierarchies', type=int, default=3, help='Number of hierarchies in the model')
+    parser.add_argument('--block_repeats', type=str, default="2,2,10", help='Comma-separated list of block repeats for each hierarchy')
+    parser.add_argument('--num_classes', type=int, default=3, help='Number of output classes')
+
+    # HTNet_Enhanced_v5 specific parameters
+    parser.add_argument('--gb_tf_channels', type=int, default=64, help='Number of channels for global transformer')
+    parser.add_argument('--gb_heads', type=int, default=2, help='Number of attention heads for global transformer')
+    parser.add_argument('--gb_n_windows', type=int, default=7, help='Number of windows for global transformer')
+    parser.add_argument('--gb_out_channel', type=int, default=256, help='Number of channels for gb branch output')
 
     config = parser.parse_args()
+    # Convert block_repeats from string to tuple of integers
+    config.block_repeats = tuple(map(int, config.block_repeats.split(',')))
     main(config)
